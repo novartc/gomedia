@@ -303,12 +303,12 @@ func (track *mp4track) writeH264(h264 []byte, pts, dts uint64) (err error) {
 		nalu_type := codec.H264NaluType(nalu)
 		switch nalu_type {
 		case codec.H264_NAL_SPS:
-			spsid := codec.GetSPSIdWithStartCode(nalu)
-			for _, sps := range h264extra.spss {
-				if spsid == codec.GetSPSIdWithStartCode(sps) {
-					return true
-				}
-			}
+			//spsid := codec.GetSPSIdWithStartCode(nalu)
+			//for _, sps := range h264extra.spss {
+			//	if spsid == codec.GetSPSIdWithStartCode(sps) {
+			//		return true
+			//	}
+			//}
 			tmp := make([]byte, len(nalu))
 			copy(tmp, nalu)
 			h264extra.spss = append(h264extra.spss, tmp)
@@ -322,12 +322,12 @@ func (track *mp4track) writeH264(h264 []byte, pts, dts uint64) (err error) {
 				}
 			}
 		case codec.H264_NAL_PPS:
-			ppsid := codec.GetPPSIdWithStartCode(nalu)
-			for _, pps := range h264extra.ppss {
-				if ppsid == codec.GetPPSIdWithStartCode(pps) {
-					return true
-				}
-			}
+			//ppsid := codec.GetPPSIdWithStartCode(nalu)
+			//for _, pps := range h264extra.ppss {
+			//	if ppsid == codec.GetPPSIdWithStartCode(pps) {
+			//		return true
+			//	}
+			//}
 			tmp := make([]byte, len(nalu))
 			copy(tmp, nalu)
 			h264extra.ppss = append(h264extra.ppss, tmp)
