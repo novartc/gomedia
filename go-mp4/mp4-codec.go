@@ -9,6 +9,7 @@ type MP4_CODEC_TYPE int
 const (
 	MP4_CODEC_H264 MP4_CODEC_TYPE = iota + 1
 	MP4_CODEC_H265
+	MP4_CODEC_VP8
 
 	MP4_CODEC_AAC MP4_CODEC_TYPE = iota + 100
 	MP4_CODEC_G711A
@@ -19,7 +20,7 @@ const (
 )
 
 func isVideo(cid MP4_CODEC_TYPE) bool {
-	return cid == MP4_CODEC_H264 || cid == MP4_CODEC_H265
+	return cid == MP4_CODEC_H264 || cid == MP4_CODEC_H265 || cid == MP4_CODEC_VP8
 }
 
 func isAudio(cid MP4_CODEC_TYPE) bool {
@@ -33,6 +34,8 @@ func getCodecNameWithCodecId(cid MP4_CODEC_TYPE) [4]byte {
 		return [4]byte{'a', 'v', 'c', '1'}
 	case MP4_CODEC_H265:
 		return [4]byte{'h', 'v', 'c', '1'}
+	case MP4_CODEC_VP8:
+		return [4]byte{'v', 'p', '0', '8'}
 	case MP4_CODEC_AAC, MP4_CODEC_MP2, MP4_CODEC_MP3:
 		return [4]byte{'m', 'p', '4', 'a'}
 	case MP4_CODEC_G711A:
