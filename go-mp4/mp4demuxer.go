@@ -193,6 +193,10 @@ func (demuxer *MovDemuxer) ReadHead() ([]TrackInfo, error) {
 			demuxer.tracks[len(demuxer.tracks)-1].cid = MP4_CODEC_VP8
 			demuxer.tracks[len(demuxer.tracks)-1].extra = new(vp8ExtraData)
 			err = decodeVisualSampleEntry(demuxer)
+		case mov_tag([4]byte{'v', 'p', '0', '9'}):
+			demuxer.tracks[len(demuxer.tracks)-1].cid = MP4_CODEC_VP9
+			demuxer.tracks[len(demuxer.tracks)-1].extra = new(vp9ExtraData)
+			err = decodeVisualSampleEntry(demuxer)
 		case mov_tag([4]byte{'e', 'n', 'c', 'a'}):
 			err = decodeAudioSampleEntry(demuxer)
 		case mov_tag([4]byte{'m', 'p', '4', 'a'}):
@@ -378,6 +382,8 @@ func (demuxer *MovDemuxer) ReadPacket() (*AVPacket, error) {
 			}
 			avpkg.Data = demuxer.processH265(sample, extra)
 		} else if whichTrack.cid == MP4_CODEC_VP8 {
+			avpkg.Data = sample
+		} else if whichTrack.cid == MP4_CODEC_VP9 {
 			avpkg.Data = sample
 		} else if whichTrack.cid == MP4_CODEC_AAC {
 			aacExtra, ok := whichTrack.extra.(*aacExtraData)

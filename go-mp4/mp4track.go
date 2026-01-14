@@ -100,6 +100,19 @@ func (extra *vp8ExtraData) load(data []byte) {
 	copy(extra.vpcc, data)
 }
 
+type vp9ExtraData struct {
+	vpcc []byte
+}
+
+func (extra *vp9ExtraData) export() []byte {
+	return extra.vpcc
+}
+
+func (extra *vp9ExtraData) load(data []byte) {
+	extra.vpcc = make([]byte, len(data))
+	copy(extra.vpcc, data)
+}
+
 type movFragment struct {
 	offset   uint64
 	duration uint32
@@ -170,6 +183,8 @@ func newmp4track(cid MP4_CODEC_TYPE, writer io.WriteSeeker) *mp4track {
 		track.extra = newh265ExtraData()
 	} else if cid == MP4_CODEC_VP8 {
 		track.extra = new(vp8ExtraData)
+	} else if cid == MP4_CODEC_VP9 {
+		track.extra = new(vp9ExtraData)
 	} else if cid == MP4_CODEC_AAC {
 		track.extra = new(aacExtraData)
 	}
@@ -299,6 +314,8 @@ func (track *mp4track) writeSample(sample []byte, pts, dts uint64) (err error) {
 		err = track.writeH265(sample, pts, dts)
 	case MP4_CODEC_VP8:
 		err = track.writeVP8(sample, pts, dts)
+	case MP4_CODEC_VP9:
+		err = track.writeVP9(sample, pts, dts)
 	case MP4_CODEC_AAC:
 		err = track.writeAAC(sample, pts, dts)
 	case MP4_CODEC_G711A, MP4_CODEC_G711U:
@@ -456,10 +473,10 @@ func (track *mp4track) writeVP8(vp8frame []byte, pts, dts uint64) (err error) {
 		panic("must init vp8ExtraData first")
 	}
 
-	isKeyFrame := codec.IsKeyFrame(vp8frame)
+	isKeyFrame := codec.IsVP8KeyFrame(vp8frame)
 	if isKeyFrame && len(vp8extra.vpcc) == 0 {
 		if track.width == 0 || track.height == 0 {
-			width, height, err := codec.GetResloution(vp8frame)
+			width, height, err := codec.GetVP8Resloution(vp8frame)
 			if err != nil {
 				return err
 			}
@@ -486,6 +503,50 @@ func (track *mp4track) writeVP8(vp8frame []byte, pts, dts uint64) (err error) {
 	}
 	n := 0
 	if n, err = track.writer.Write(vp8frame); err != nil {
+		return
+	}
+	entry.size = uint64(n)
+	track.addSampleEntry(entry)
+	track.lastSample.isKey = isKeyFrame
+	return
+}
+
+func (track *mp4track) writeVP9(vp9frame []byte, pts, dts uint64) (err error) {
+	vp9extra, ok := track.extra.(*vp9ExtraData)
+	if !ok {
+		panic("must init vp9ExtraData first")
+	}
+
+	isKeyFrame := codec.IsVP9KeyFrame(vp9frame)
+	if isKeyFrame && len(vp9extra.vpcc) == 0 {
+		if track.width == 0 || track.height == 0 {
+			width, height, err := codec.GetVP9Resloution(vp9frame)
+			if err != nil {
+				return err
+			}
+			track.width = uint32(width)
+			track.height = uint32(height)
+		}
+		vpcc, err := codec.CreateVP9VpcCExtradata(vp9frame)
+		if err != nil {
+			return err
+		}
+		vp9extra.vpcc = vpcc
+	}
+
+	var currentOffset int64
+	if currentOffset, err = track.writer.Seek(0, io.SeekCurrent); err != nil {
+		return
+	}
+	entry := sampleEntry{
+		pts:                    pts,
+		dts:                    dts,
+		isKeyFrame:             isKeyFrame,
+		SampleDescriptionIndex: 1,
+		offset:                 uint64(currentOffset),
+	}
+	n := 0
+	if n, err = track.writer.Write(vp9frame); err != nil {
 		return
 	}
 	entry.size = uint64(n)

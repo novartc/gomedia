@@ -16,6 +16,17 @@ type VP8KeyFrameHead struct {
 	VertScale  int
 }
 
+/*
+Frame Tag, 3字节
+
+0 1 2 3 4 5 6 7   8 9 10 11 12 13 14 15   16 17 18 19 20 21 22 23
++-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
+|I|P|  Version  |     Partition 0 Length (19 bits)   |
++-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+ +-+-+-+-+-+-+-+-+
+
+I (1 bit): 关键帧标志。0 表示关键帧，1 表示非关键帧。
+*/
+
 func DecodeFrameTag(frame []byte) (*VP8FrameTag, error) {
 	if len(frame) < 3 {
 		return nil, errors.New("frame bytes < 3")
@@ -28,6 +39,18 @@ func DecodeFrameTag(frame []byte) (*VP8FrameTag, error) {
 	tag.FirstPartSize = (tmp >> 5) & 0x7FFFF
 	return tag, nil
 }
+
+/*
+VP8 Frame:
+├── Frame Tag (3 bytes)
+│   ├── Key Frame? (I bit)
+│   └── Partition 0 Length
+├── [If Key Frame]
+│   ├── Start Code (0x9D012A)
+│   ├── Width, Height
+├── Partition 0 (mode, control info)
+├── Partition 1+ (macroblock residuals)
+*/
 
 func DecodeKeyFrameHead(frame []byte) (*VP8KeyFrameHead, error) {
 	if len(frame) < 7 {
@@ -46,7 +69,7 @@ func DecodeKeyFrameHead(frame []byte) (*VP8KeyFrameHead, error) {
 	return head, nil
 }
 
-func IsKeyFrame(frame []byte) bool {
+func IsVP8KeyFrame(frame []byte) bool {
 	tag, err := DecodeFrameTag(frame)
 	if err != nil {
 		return false
@@ -59,11 +82,7 @@ func IsKeyFrame(frame []byte) bool {
 	}
 }
 
-func GetResloution(frame []byte) (width int, height int, err error) {
-	if !IsKeyFrame(frame) {
-		return 0, 0, errors.New("the frame is not Key frame")
-	}
-
+func GetVP8Resloution(frame []byte) (width int, height int, err error) {
 	head, err := DecodeKeyFrameHead(frame[3:])
 	if err != nil {
 		return 0, 0, err
@@ -93,45 +112,37 @@ func GetResloution(frame []byte) (width int, height int, err error) {
 //	  unsigned int(8)     codecInitializationData[codecInitializationDataSize];
 //	}
 func CreateVP8VpcCExtradata(keyframe []byte) ([]byte, error) {
-	if !IsKeyFrame(keyframe) {
-		return nil, errors.New("not a keyframe")
-	}
-
 	tag, err := DecodeFrameTag(keyframe)
 	if err != nil {
 		return nil, err
 	}
 
 	// vpcC box for VP8
-	// Based on "VP Codec ISO Media File Format Binding v2.0"
-	// Total size: 4 (FullBox) + 8 (fields) + 2 (size) = 14 bytes
-	vpcc := make([]byte, 14)
-
-	// FullBox version and flags
-	vpcc[0] = 1 // version
-	vpcc[1] = 0 // flags
-	vpcc[2] = 0 // flags
-	vpcc[3] = 0 // flags
+	// Based on "VP Codec ISO Media File Format Binding"
+	// The record is 8 bytes long without codecInitializationData
+	vpcc := make([]byte, 8)
 
 	// profile: from frame tag version
-	vpcc[4] = byte(tag.Version)
+	vpcc[0] = byte(tag.Version)
 	// level: undefined for VP8, use a default
-	vpcc[5] = 0
-	// bitDepth: VP8 is 8-bit
-	vpcc[6] = 8
-	// chromaSubsampling: 0 for 4:2:0
-	vpcc[7] = 0
-	// videoFullRangeFlag: VP8 is typically full range
-	vpcc[8] = 1
+	vpcc[1] = 0
+
+	// Pack bitDepth, chromaSubsampling, and videoFullRangeFlag into one byte
+	var bitDepth byte = 8           // VP8 is 8-bit
+	var chromaSubsampling byte = 0  // 0 for 4:2:0
+	var videoFullRangeFlag byte = 1 // VP8 is typically full range
+	// bitDepth (4 bits), chromaSubsampling (3 bits), videoFullRangeFlag (1 bit)
+	vpcc[2] = ((bitDepth & 0x0F) << 4) | ((chromaSubsampling & 0x07) << 1) | (videoFullRangeFlag & 0x01)
+
 	// colourPrimaries: 2 for unspecified
-	vpcc[9] = 2
+	vpcc[3] = 2
 	// transferCharacteristics: 2 for unspecified
-	vpcc[10] = 2
+	vpcc[4] = 2
 	// matrixCoefficients: 2 for unspecified
-	vpcc[11] = 2
+	vpcc[5] = 2
 	// codecInitializationDataSize: 0
-	vpcc[12] = 0
-	vpcc[13] = 0
+	vpcc[6] = 0
+	vpcc[7] = 0
 
 	return vpcc, nil
 }

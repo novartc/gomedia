@@ -314,7 +314,7 @@ func makeStsd(track *mp4track, handler_type HandlerType) []byte {
 	var avbox []byte
 	var extraData []byte
 	if len(track.extraData) == 0 {
-		if track.cid == MP4_CODEC_AAC || track.cid == MP4_CODEC_H264 || track.cid == MP4_CODEC_H265 {
+		if track.cid == MP4_CODEC_AAC || track.cid == MP4_CODEC_H264 || track.cid == MP4_CODEC_H265 || track.cid == MP4_CODEC_VP8 || track.cid == MP4_CODEC_VP9 {
 			if track.extra == nil {
 				panic(fmt.Sprintf("track %d:extra is nil", track.trackId))
 			}
@@ -328,7 +328,7 @@ func makeStsd(track *mp4track, handler_type HandlerType) []byte {
 		avbox = makeAvcCBox(extraData)
 	} else if track.cid == MP4_CODEC_H265 {
 		avbox = makeHvcCBox(extraData)
-	} else if track.cid == MP4_CODEC_VP8 {
+	} else if track.cid == MP4_CODEC_VP8 || track.cid == MP4_CODEC_VP9 {
 		avbox = makeVpcCBox(extraData)
 	} else if track.cid == MP4_CODEC_AAC || track.cid == MP4_CODEC_MP2 || track.cid == MP4_CODEC_MP3 {
 		avbox = makeEsdsBox(track.trackId, track.cid, extraData)
@@ -408,23 +408,27 @@ func decodeHvccBox(demuxer *MovDemuxer, size uint32) (err error) {
 }
 
 func makeVpcCBox(extraData []byte) []byte {
-	vpcc := BasicBox{Type: [4]byte{'v', 'p', 'c', 'C'}}
-	vpcc.Size = 8 + uint64(len(extraData))
+	vpcc := FullBox{Box: NewBasicBox([4]byte{'v', 'p', 'c', 'C'}), Version: 1}
+	vpcc.Box.Size = vpcc.Size() + uint64(len(extraData))
 	offset, boxdata := vpcc.Encode()
 	copy(boxdata[offset:], extraData)
 	return boxdata
 }
 
 func decodeVpccBox(demuxer *MovDemuxer, size uint32) (err error) {
-	buf := make([]byte, size-BasicBoxLen)
+	buf := make([]byte, size-FullBoxLen)
 	if _, err = io.ReadFull(demuxer.reader, buf); err != nil {
 		return
 	}
 	track := demuxer.tracks[len(demuxer.tracks)-1]
 	if track.extra == nil {
-		track.extra = new(vp8ExtraData)
+		if track.cid == MP4_CODEC_VP9 {
+			track.extra = new(vp9ExtraData)
+		} else {
+			track.extra = new(vp8ExtraData)
+		}
 	}
-	track.extra.load(buf)
+	track.extra.load(buf[4:]) //skip version and flags
 	return
 }
 
