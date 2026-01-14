@@ -292,7 +292,7 @@ func (track *mp4track) makeStblTable() {
 	track.stbltable.stsc = stsc
 	track.stbltable.stco = stco
 	track.stbltable.stsz = stsz
-	if track.cid == MP4_CODEC_H264 || track.cid == MP4_CODEC_H265 {
+	if track.cid == MP4_CODEC_H264 || track.cid == MP4_CODEC_H265 || track.cid == MP4_CODEC_VP8 || track.cid == MP4_CODEC_VP9 {
 		track.stbltable.ctts = ctts
 	}
 }
