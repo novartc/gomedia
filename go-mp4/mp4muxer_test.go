@@ -13,6 +13,83 @@ import (
 	"github.com/yapingcat/gomedia/go-mpeg2"
 )
 
+func countMP4Boxes(data []byte, typ string) int {
+	count := 0
+	for offset := 0; offset+8 <= len(data); {
+		size := uint64(binary.BigEndian.Uint32(data[offset:]))
+		headerSize := uint64(8)
+		if size == 1 {
+			if offset+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[offset+8:])
+			headerSize = 16
+		} else if size == 0 {
+			size = uint64(len(data) - offset)
+		}
+		if size < headerSize || offset+int(size) > len(data) {
+			break
+		}
+		boxType := string(data[offset+4 : offset+8])
+		if boxType == typ {
+			count++
+		}
+		switch boxType {
+		case "moov", "trak", "mdia", "minf", "stbl", "moof", "traf":
+			count += countMP4Boxes(data[offset+int(headerSize):offset+int(size)], typ)
+		}
+		offset += int(size)
+	}
+	return count
+}
+
+func TestFragmentMuxerAudioOnlyWhileVideoDelayed(t *testing.T) {
+	file, err := os.CreateTemp("", "gomedia-fragment-audio-only-*.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	muxer, err := CreateMp4Muxer(file, WithMp4Flag(MP4_FLAG_FRAGMENT), WithFragmentDuration(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxer.AddVideoTrack(MP4_CODEC_VP8, WithVideoWidth(640), WithVideoHeight(360))
+	audioTrack := muxer.AddAudioTrack(
+		MP4_CODEC_G711A,
+		WithAudioChannelCount(1),
+		WithAudioSampleRate(8000),
+		WithAudioSampleBits(16),
+	)
+
+	for dts := uint64(0); dts <= 360; dts += 20 {
+		if err := muxer.Write(audioTrack, []byte{0, 0, 0, 0}, dts, dts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := muxer.WriteTrailer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	moofCount := countMP4Boxes(data, "moof")
+	trafCount := countMP4Boxes(data, "traf")
+	if moofCount < 2 {
+		t.Fatalf("expected multiple audio-only moof boxes, got %d", moofCount)
+	}
+	if trafCount != moofCount {
+		t.Fatalf("expected one audio traf per audio-only moof, got moof=%d traf=%d", moofCount, trafCount)
+	}
+}
+
 func TestCreateMp4Reader(t *testing.T) {
 	f, err := os.Open("jellyfish-3-mbps-hd.h264.mp4")
 	if err != nil {

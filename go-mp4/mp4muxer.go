@@ -47,6 +47,12 @@ func WithMp4Flag(f MP4_FLAG) MuxerOption {
 	}
 }
 
+func WithFragmentDuration(durationMs uint32) MuxerOption {
+	return func(muxer *Movmuxer) {
+		muxer.fragDuration = durationMs
+	}
+}
+
 func CreateMp4Muxer(w io.WriteSeeker, options ...MuxerOption) (*Movmuxer, error) {
 	muxer := &Movmuxer{
 		writer:         w,
@@ -178,6 +184,10 @@ func (muxer *Movmuxer) Write(track uint32, data []byte, pts uint64, dts uint64) 
 		return err
 	}
 
+	if muxer.fragDuration > 0 {
+		return muxer.maybeFlushFragment(mp4track)
+	}
+
 	if isAudio(mp4track.cid) {
 		return nil
 	}
@@ -186,16 +196,84 @@ func (muxer *Movmuxer) Write(track uint32, data []byte, pts uint64, dts uint64) 
 	isKeyFrag := muxer.movFlag.has(MP4_FLAG_KEYFRAME)
 	if isKeyFrag {
 		if mp4track.lastSample.isKey && mp4track.duration > 0 {
-			err = muxer.flushFragment()
-			if err != nil {
-				return err
-			}
-			if muxer.onNewFragment != nil {
-				muxer.onNewFragment(mp4track.duration, mp4track.startPts, mp4track.startDts)
-			}
+			return muxer.flushFragmentWithCallback(mp4track)
 		}
 	}
 
+	return nil
+}
+
+func (muxer *Movmuxer) maybeFlushFragment(track *mp4track) error {
+	if track == nil {
+		return nil
+	}
+
+	if isAudio(track.cid) {
+		if muxer.canFlushAudioOnly() && track.pendingDuration() >= muxer.fragDuration {
+			return muxer.flushFragmentWithCallback(track)
+		}
+		return nil
+	}
+
+	if isVideo(track.cid) && track.lastSample.isKey && muxer.pendingDuration() >= muxer.fragDuration {
+		return muxer.flushFragmentWithCallback(track)
+	}
+	return nil
+}
+
+func (muxer *Movmuxer) canFlushAudioOnly() bool {
+	for _, track := range muxer.tracks {
+		if !isVideo(track.cid) {
+			continue
+		}
+		if len(track.samplelist) > 0 {
+			return false
+		}
+		if track.lastSample != nil && track.lastSample.hasVcl {
+			return false
+		}
+		if track.active && len(track.fragments) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func (muxer *Movmuxer) pendingDuration() uint32 {
+	duration := uint32(0)
+	for _, track := range muxer.tracks {
+		if d := track.pendingDuration(); d > duration {
+			duration = d
+		}
+	}
+	return duration
+}
+
+func (muxer *Movmuxer) flushFragmentWithCallback(track *mp4track) error {
+	duration, firstPts, firstDts, ok := track.fragmentInfo()
+	if err := muxer.flushFragment(); err != nil {
+		return err
+	}
+	if ok && muxer.onNewFragment != nil {
+		muxer.onNewFragment(duration, firstPts, firstDts)
+	}
+	return nil
+}
+
+func (muxer *Movmuxer) SetTrackActive(track uint32, active bool) error {
+	if mp4track := muxer.tracks[track]; mp4track != nil {
+		if !active {
+			if err := mp4track.flush(); err != nil {
+				return err
+			}
+			if (muxer.movFlag.isFragment() || muxer.movFlag.isDash()) && len(mp4track.samplelist) > 0 {
+				if err := muxer.flushFragmentWithCallback(mp4track); err != nil {
+					return err
+				}
+			}
+		}
+		mp4track.active = active
+	}
 	return nil
 }
 
@@ -210,17 +288,31 @@ func (muxer *Movmuxer) WriteTrailer() (err error) {
 	switch {
 	case muxer.movFlag.isDash():
 	case muxer.movFlag.isFragment():
+		var callbackTrack *mp4track
+		for _, track := range muxer.tracks {
+			if isVideo(track.cid) && len(track.samplelist) > 0 {
+				callbackTrack = track
+				break
+			}
+		}
+		if callbackTrack == nil {
+			for _, track := range muxer.tracks {
+				if len(track.samplelist) > 0 {
+					callbackTrack = track
+					break
+				}
+			}
+		}
+		duration, firstPts, firstDts, ok := uint32(0), uint64(0), uint64(0), false
+		if callbackTrack != nil {
+			duration, firstPts, firstDts, ok = callbackTrack.fragmentInfo()
+		}
 		err = muxer.flushFragment()
 		if err != nil {
 			return err
 		}
-		for _, track := range muxer.tracks {
-			if isAudio(track.cid) {
-				continue
-			}
-			if muxer.onNewFragment != nil {
-				muxer.onNewFragment(track.duration, track.startPts, track.startPts)
-			}
+		if ok && muxer.onNewFragment != nil {
+			muxer.onNewFragment(duration, firstPts, firstDts)
 		}
 		return muxer.writeMfra()
 	default:
@@ -350,6 +442,16 @@ func (muxer *Movmuxer) FlushFragment() (err error) {
 }
 
 func (muxer *Movmuxer) flushFragment() (err error) {
+	hasSamples := false
+	for i := uint32(1); i < muxer.nextTrackId; i++ {
+		if len(muxer.tracks[i].samplelist) > 0 {
+			hasSamples = true
+			break
+		}
+	}
+	if !hasSamples {
+		return nil
+	}
 
 	if muxer.movFlag.isFragment() {
 		if muxer.nextFragmentId == 1 { //first fragment ,write moov
@@ -385,6 +487,9 @@ func (muxer *Movmuxer) flushFragment() (err error) {
 	moofSize += len(mfhd)
 	trafs := make([][]byte, len(muxer.tracks))
 	for i := uint32(1); i < muxer.nextTrackId; i++ {
+		if len(muxer.tracks[i].samplelist) == 0 {
+			continue
+		}
 		traf := makeTraf(muxer.tracks[i], uint64(moofOffset), uint64(0))
 		moofSize += len(traf)
 		trafs[i-1] = traf
@@ -394,6 +499,9 @@ func (muxer *Movmuxer) flushFragment() (err error) {
 	mfhd = makeMfhdBox(muxer.nextFragmentId)
 	trafs = make([][]byte, len(muxer.tracks))
 	for i := uint32(1); i < muxer.nextTrackId; i++ {
+		if len(muxer.tracks[i].samplelist) == 0 {
+			continue
+		}
 		traf := makeTraf(muxer.tracks[i], uint64(moofOffset), uint64(moofSize+8)) //moofSize + 8(mdat box)
 		trafs[i-1] = traf
 	}
@@ -447,7 +555,7 @@ func (muxer *Movmuxer) flushFragment() (err error) {
 			lastDts := muxer.tracks[i].samplelist[len(muxer.tracks[i].samplelist)-1].dts
 			frag := movFragment{
 				offset:   uint64(moofOffset),
-				duration: muxer.tracks[i].duration,
+				duration: muxer.tracks[i].pendingDuration(),
 				firstDts: firstDts,
 				firstPts: firstPts,
 				lastPts:  lastPts,
