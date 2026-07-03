@@ -123,23 +123,26 @@ type movFragment struct {
 }
 
 type mp4track struct {
-	cid         MP4_CODEC_TYPE
-	trackId     uint32
-	stbltable   *movstbl
-	duration    uint32
-	timescale   uint32
-	width       uint32
-	height      uint32
-	sampleRate  uint32
-	sampleBits  uint8
-	chanelCount uint8
-	samplelist  []sampleEntry
-	elst        *movelst
-	elstDelay   uint64
-	extra       extraData
-	lastSample  *sampleCache
-	writer      io.WriteSeeker
-	fragments   []movFragment
+	cid          MP4_CODEC_TYPE
+	trackId      uint32
+	stbltable    *movstbl
+	duration     uint32
+	timescale    uint32
+	width        uint32
+	height       uint32
+	sampleRate   uint32
+	sampleBits   uint8
+	chanelCount  uint8
+	samplelist   []sampleEntry
+	elst         *movelst
+	elstDelay    uint64
+	extra        extraData
+	lastSample   *sampleCache
+	writer       io.WriteSeeker
+	fragments    []movFragment
+	active       bool
+	hasInput     bool
+	lastInputDts uint64
 
 	//for fmp4
 	extraData          []byte
@@ -147,6 +150,7 @@ type mp4track struct {
 	startPts           uint64
 	defaultSize        uint32
 	defaultDuration    uint32
+	lastSampleDuration uint32
 	defaultSampleFlags uint32
 	baseDataOffset     uint64
 
@@ -175,6 +179,7 @@ func newmp4track(cid MP4_CODEC_TYPE, writer io.WriteSeeker) *mp4track {
 		writer:    writer,
 		fragments: make([]movFragment, 0, 32),
 		startDts:  0,
+		active:    true,
 	}
 
 	if cid == MP4_CODEC_H264 {
@@ -198,11 +203,47 @@ func (track *mp4track) addSampleEntry(entry sampleEntry) {
 		delta := int64(entry.dts - track.samplelist[len(track.samplelist)-1].dts)
 		if delta < 0 {
 			track.duration += 1
+			track.lastSampleDuration = 1
 		} else {
 			track.duration += uint32(delta)
+			if delta > 0 {
+				track.lastSampleDuration = uint32(delta)
+			}
 		}
 	}
 	track.samplelist = append(track.samplelist, entry)
+}
+
+func (track *mp4track) fallbackSampleDuration() uint32 {
+	if track.lastSampleDuration > 0 {
+		return track.lastSampleDuration
+	}
+	if track.defaultDuration > 0 {
+		return track.defaultDuration
+	}
+	return 0
+}
+
+func (track *mp4track) pendingDuration() uint32 {
+	if len(track.samplelist) == 0 {
+		return 0
+	}
+	firstDts := track.samplelist[0].dts
+	lastDts := track.samplelist[len(track.samplelist)-1].dts
+	if track.lastSample != nil && track.lastSample.dts > lastDts {
+		lastDts = track.lastSample.dts
+	}
+	if lastDts <= firstDts {
+		return track.defaultDuration
+	}
+	return uint32(lastDts - firstDts)
+}
+
+func (track *mp4track) fragmentInfo() (duration uint32, firstPts, firstDts uint64, ok bool) {
+	if len(track.samplelist) == 0 {
+		return 0, 0, 0, false
+	}
+	return track.pendingDuration(), track.samplelist[0].pts, track.samplelist[0].dts, true
 }
 
 func (track *mp4track) makeStblTable() {

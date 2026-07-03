@@ -13,6 +13,356 @@ import (
 	"github.com/yapingcat/gomedia/go-mpeg2"
 )
 
+func countMP4Boxes(data []byte, typ string) int {
+	count := 0
+	for offset := 0; offset+8 <= len(data); {
+		size := uint64(binary.BigEndian.Uint32(data[offset:]))
+		headerSize := uint64(8)
+		if size == 1 {
+			if offset+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[offset+8:])
+			headerSize = 16
+		} else if size == 0 {
+			size = uint64(len(data) - offset)
+		}
+		if size < headerSize || offset+int(size) > len(data) {
+			break
+		}
+		boxType := string(data[offset+4 : offset+8])
+		if boxType == typ {
+			count++
+		}
+		switch boxType {
+		case "moov", "trak", "mdia", "minf", "stbl", "moof", "traf":
+			count += countMP4Boxes(data[offset+int(headerSize):offset+int(size)], typ)
+		}
+		offset += int(size)
+	}
+	return count
+}
+
+func moofTrafCounts(data []byte) []int {
+	counts := make([]int, 0)
+	for offset := 0; offset+8 <= len(data); {
+		size := uint64(binary.BigEndian.Uint32(data[offset:]))
+		headerSize := uint64(8)
+		if size == 1 {
+			if offset+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[offset+8:])
+			headerSize = 16
+		} else if size == 0 {
+			size = uint64(len(data) - offset)
+		}
+		if size < headerSize || offset+int(size) > len(data) {
+			break
+		}
+		if string(data[offset+4:offset+8]) == "moof" {
+			counts = append(counts, countMP4Boxes(data[offset+int(headerSize):offset+int(size)], "traf"))
+		}
+		offset += int(size)
+	}
+	return counts
+}
+
+func collectBoxPayloads(data []byte, typ string) [][]byte {
+	payloads := make([][]byte, 0)
+	for offset := 0; offset+8 <= len(data); {
+		size := uint64(binary.BigEndian.Uint32(data[offset:]))
+		headerSize := uint64(8)
+		if size == 1 {
+			if offset+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[offset+8:])
+			headerSize = 16
+		} else if size == 0 {
+			size = uint64(len(data) - offset)
+		}
+		if size < headerSize || offset+int(size) > len(data) {
+			break
+		}
+		boxType := string(data[offset+4 : offset+8])
+		payload := data[offset+int(headerSize) : offset+int(size)]
+		if boxType == typ {
+			payloads = append(payloads, payload)
+		}
+		switch boxType {
+		case "moov", "trak", "mdia", "minf", "stbl", "moof", "traf", "mvex":
+			payloads = append(payloads, collectBoxPayloads(payload, typ)...)
+		}
+		offset += int(size)
+	}
+	return payloads
+}
+
+func collectTrexTrackIDs(data []byte) []uint32 {
+	payloads := collectBoxPayloads(data, "trex")
+	ids := make([]uint32, 0, len(payloads))
+	for _, payload := range payloads {
+		if len(payload) < 8 {
+			continue
+		}
+		ids = append(ids, binary.BigEndian.Uint32(payload[4:8]))
+	}
+	return ids
+}
+
+func findTopLevelBox(data []byte, typ string) []byte {
+	for offset := 0; offset+8 <= len(data); {
+		size := uint64(binary.BigEndian.Uint32(data[offset:]))
+		headerSize := uint64(8)
+		if size == 1 {
+			if offset+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[offset+8:])
+			headerSize = 16
+		} else if size == 0 {
+			size = uint64(len(data) - offset)
+		}
+		if size < headerSize || offset+int(size) > len(data) {
+			break
+		}
+		if string(data[offset+4:offset+8]) == typ {
+			return data[offset : offset+int(size)]
+		}
+		offset += int(size)
+	}
+	return nil
+}
+
+func mfroMfraSize(mfra []byte) uint32 {
+	payloads := collectBoxPayloads(mfra[8:], "mfro")
+	if len(payloads) == 0 || len(payloads[0]) < 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(payloads[0][4:8])
+}
+
+func hasTrackID(ids []uint32, id uint32) bool {
+	for _, current := range ids {
+		if current == id {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFragmentMuxerWritesConsistentMfraSize(t *testing.T) {
+	file, err := os.CreateTemp("", "gomedia-fragment-mfra-*.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	muxer, err := CreateMp4Muxer(file, WithMp4Flag(MP4_FLAG_FRAGMENT), WithFragmentDuration(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioTrack := muxer.AddAudioTrack(
+		MP4_CODEC_G711A,
+		WithAudioChannelCount(1),
+		WithAudioSampleRate(8000),
+		WithAudioSampleBits(16),
+	)
+	for dts := uint64(0); dts <= 220; dts += 20 {
+		if err := muxer.Write(audioTrack, []byte{0, 0, 0, 0}, dts, dts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := muxer.WriteTrailer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mfra := findTopLevelBox(data, "mfra")
+	if len(mfra) == 0 {
+		t.Fatal("mfra box not found")
+	}
+	if got, want := mfroMfraSize(mfra), uint32(len(mfra)); got != want {
+		t.Fatalf("mfro mfra size = %d, want %d", got, want)
+	}
+}
+
+func TestFragmentMuxerAudioOnlyWhileVideoDelayed(t *testing.T) {
+	file, err := os.CreateTemp("", "gomedia-fragment-audio-only-*.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	muxer, err := CreateMp4Muxer(file, WithMp4Flag(MP4_FLAG_FRAGMENT), WithFragmentDuration(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	muxer.AddVideoTrack(MP4_CODEC_VP8, WithVideoWidth(640), WithVideoHeight(360))
+	audioTrack := muxer.AddAudioTrack(
+		MP4_CODEC_G711A,
+		WithAudioChannelCount(1),
+		WithAudioSampleRate(8000),
+		WithAudioSampleBits(16),
+	)
+
+	for dts := uint64(0); dts <= 360; dts += 20 {
+		if err := muxer.Write(audioTrack, []byte{0, 0, 0, 0}, dts, dts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := muxer.WriteTrailer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	moofCount := countMP4Boxes(data, "moof")
+	trafCount := countMP4Boxes(data, "traf")
+	if moofCount < 2 {
+		t.Fatalf("expected multiple audio-only moof boxes, got %d", moofCount)
+	}
+	if trafCount != moofCount {
+		t.Fatalf("expected one audio traf per audio-only moof, got moof=%d traf=%d", moofCount, trafCount)
+	}
+}
+
+func TestFragmentMuxerAutoIdleVideoAllowsAudioOnly(t *testing.T) {
+	file, err := os.CreateTemp("", "gomedia-fragment-video-idle-*.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	muxer, err := CreateMp4Muxer(
+		file,
+		WithMp4Flag(MP4_FLAG_FRAGMENT),
+		WithFragmentDuration(100),
+		WithTrackIdleTimeout(120),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	videoTrack := muxer.AddVideoTrack(
+		MP4_CODEC_VP8,
+		WithVideoWidth(640),
+		WithVideoHeight(360),
+		WithExtraData([]byte{0}),
+	)
+	audioTrack := muxer.AddAudioTrack(
+		MP4_CODEC_G711A,
+		WithAudioChannelCount(1),
+		WithAudioSampleRate(8000),
+		WithAudioSampleBits(16),
+	)
+
+	if err := muxer.Write(videoTrack, []byte{1, 0, 0, 0}, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	for dts := uint64(0); dts <= 420; dts += 20 {
+		if err := muxer.Write(audioTrack, []byte{0, 0, 0, 0}, dts, dts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := muxer.WriteTrailer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	trafCounts := moofTrafCounts(data)
+	if len(trafCounts) < 3 {
+		t.Fatalf("expected video+audio fragment followed by audio-only fragments, got %v", trafCounts)
+	}
+	if trafCounts[0] != 2 {
+		t.Fatalf("expected first fragment to contain audio and video trafs, got %v", trafCounts)
+	}
+	hasAudioOnly := false
+	for _, count := range trafCounts[1:] {
+		if count == 1 {
+			hasAudioOnly = true
+			break
+		}
+	}
+	if !hasAudioOnly {
+		t.Fatalf("expected audio-only fragment after video idle, got %v", trafCounts)
+	}
+}
+
+func TestFragmentMuxerWritesTrexForLateVideoTrack(t *testing.T) {
+	file, err := os.CreateTemp("", "gomedia-fragment-late-video-*.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	muxer, err := CreateMp4Muxer(file, WithMp4Flag(MP4_FLAG_FRAGMENT), WithFragmentDuration(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioTrack := muxer.AddAudioTrack(
+		MP4_CODEC_G711A,
+		WithAudioChannelCount(1),
+		WithAudioSampleRate(8000),
+		WithAudioSampleBits(16),
+	)
+
+	for dts := uint64(0); dts <= 140; dts += 20 {
+		if err := muxer.Write(audioTrack, []byte{0, 0, 0, 0}, dts, dts); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	videoTrack := muxer.AddVideoTrack(
+		MP4_CODEC_VP8,
+		WithVideoWidth(640),
+		WithVideoHeight(360),
+		WithExtraData([]byte{0}),
+	)
+	if err := muxer.Write(videoTrack, []byte{0x10, 0, 0, 0}, 200, 200); err != nil {
+		t.Fatal(err)
+	}
+	if err := muxer.WriteTrailer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	trexIDs := collectTrexTrackIDs(data)
+	if !hasTrackID(trexIDs, audioTrack) || !hasTrackID(trexIDs, videoTrack) {
+		t.Fatalf("expected trex for audio track %d and late video track %d, got %v", audioTrack, videoTrack, trexIDs)
+	}
+}
+
 func TestCreateMp4Reader(t *testing.T) {
 	f, err := os.Open("jellyfish-3-mbps-hd.h264.mp4")
 	if err != nil {
