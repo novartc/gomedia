@@ -29,14 +29,15 @@ func (f MP4_FLAG) isDash() bool {
 
 type OnFragment func(duration uint32, firstPts, firstDts uint64)
 type Movmuxer struct {
-	writer         io.WriteSeeker
-	nextTrackId    uint32
-	nextFragmentId uint32
-	mdatOffset     uint32
-	tracks         map[uint32]*mp4track
-	movFlag        MP4_FLAG
-	onNewFragment  OnFragment
-	fragDuration   uint32
+	writer           io.WriteSeeker
+	nextTrackId      uint32
+	nextFragmentId   uint32
+	mdatOffset       uint32
+	tracks           map[uint32]*mp4track
+	movFlag          MP4_FLAG
+	onNewFragment    OnFragment
+	fragDuration     uint32
+	trackIdleTimeout uint32
 }
 
 type MuxerOption func(muxer *Movmuxer)
@@ -50,6 +51,12 @@ func WithMp4Flag(f MP4_FLAG) MuxerOption {
 func WithFragmentDuration(durationMs uint32) MuxerOption {
 	return func(muxer *Movmuxer) {
 		muxer.fragDuration = durationMs
+	}
+}
+
+func WithTrackIdleTimeout(timeoutMs uint32) MuxerOption {
+	return func(muxer *Movmuxer) {
+		muxer.trackIdleTimeout = timeoutMs
 	}
 }
 
@@ -179,12 +186,20 @@ func (muxer *Movmuxer) Write(track uint32, data []byte, pts uint64, dts uint64) 
 	if err != nil {
 		return err
 	}
+	mp4track.hasInput = true
+	mp4track.lastInputDts = dts
+	if isVideo(mp4track.cid) {
+		mp4track.active = true
+	}
 
 	if !muxer.movFlag.isFragment() && !muxer.movFlag.isDash() {
 		return err
 	}
 
 	if muxer.fragDuration > 0 {
+		if err := muxer.updateIdleTracks(mp4track, dts); err != nil {
+			return err
+		}
 		return muxer.maybeFlushFragment(mp4track)
 	}
 
@@ -200,6 +215,25 @@ func (muxer *Movmuxer) Write(track uint32, data []byte, pts uint64, dts uint64) 
 		}
 	}
 
+	return nil
+}
+
+func (muxer *Movmuxer) updateIdleTracks(source *mp4track, dts uint64) error {
+	if muxer.trackIdleTimeout == 0 || source == nil || !isAudio(source.cid) {
+		return nil
+	}
+
+	for _, track := range muxer.tracks {
+		if !isVideo(track.cid) || !track.active || !track.hasInput {
+			continue
+		}
+		if dts < track.lastInputDts || dts-track.lastInputDts < uint64(muxer.trackIdleTimeout) {
+			continue
+		}
+		if err := muxer.SetTrackActive(track.trackId, false); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

@@ -123,24 +123,26 @@ type movFragment struct {
 }
 
 type mp4track struct {
-	cid         MP4_CODEC_TYPE
-	trackId     uint32
-	stbltable   *movstbl
-	duration    uint32
-	timescale   uint32
-	width       uint32
-	height      uint32
-	sampleRate  uint32
-	sampleBits  uint8
-	chanelCount uint8
-	samplelist  []sampleEntry
-	elst        *movelst
-	elstDelay   uint64
-	extra       extraData
-	lastSample  *sampleCache
-	writer      io.WriteSeeker
-	fragments   []movFragment
-	active      bool
+	cid          MP4_CODEC_TYPE
+	trackId      uint32
+	stbltable    *movstbl
+	duration     uint32
+	timescale    uint32
+	width        uint32
+	height       uint32
+	sampleRate   uint32
+	sampleBits   uint8
+	chanelCount  uint8
+	samplelist   []sampleEntry
+	elst         *movelst
+	elstDelay    uint64
+	extra        extraData
+	lastSample   *sampleCache
+	writer       io.WriteSeeker
+	fragments    []movFragment
+	active       bool
+	hasInput     bool
+	lastInputDts uint64
 
 	//for fmp4
 	extraData          []byte
