@@ -1,7 +1,9 @@
 package mp4
 
 import (
+	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 )
 
@@ -29,15 +31,19 @@ func (f MP4_FLAG) isDash() bool {
 
 type OnFragment func(duration uint32, firstPts, firstDts uint64)
 type Movmuxer struct {
-	writer           io.WriteSeeker
-	nextTrackId      uint32
-	nextFragmentId   uint32
-	mdatOffset       uint32
-	tracks           map[uint32]*mp4track
-	movFlag          MP4_FLAG
-	onNewFragment    OnFragment
-	fragDuration     uint32
-	trackIdleTimeout uint32
+	writer            io.WriteSeeker
+	nextTrackId       uint32
+	nextFragmentId    uint32
+	mdatOffset        uint32
+	tracks            map[uint32]*mp4track
+	movFlag           MP4_FLAG
+	onNewFragment     OnFragment
+	fragDuration      uint32
+	trackIdleTimeout  uint32
+	moovReserveSize   uint32
+	moovReserveOffset int64
+	moovReserved      bool
+	moovWritten       bool
 }
 
 type MuxerOption func(muxer *Movmuxer)
@@ -51,12 +57,21 @@ func WithMp4Flag(f MP4_FLAG) MuxerOption {
 func WithFragmentDuration(durationMs uint32) MuxerOption {
 	return func(muxer *Movmuxer) {
 		muxer.fragDuration = durationMs
+		if muxer.moovReserveSize == 0 {
+			muxer.moovReserveSize = 64 * 1024
+		}
 	}
 }
 
 func WithTrackIdleTimeout(timeoutMs uint32) MuxerOption {
 	return func(muxer *Movmuxer) {
 		muxer.trackIdleTimeout = timeoutMs
+	}
+}
+
+func WithMoovReserveSize(size uint32) MuxerOption {
+	return func(muxer *Movmuxer) {
+		muxer.moovReserveSize = size
 	}
 }
 
@@ -348,6 +363,9 @@ func (muxer *Movmuxer) WriteTrailer() (err error) {
 		if ok && muxer.onNewFragment != nil {
 			muxer.onNewFragment(duration, firstPts, firstDts)
 		}
+		if err = muxer.writeReservedMoov(); err != nil {
+			return err
+		}
 		return muxer.writeMfra()
 	default:
 		if err = muxer.reWriteMdatSize(); err != nil {
@@ -373,6 +391,78 @@ func (muxer *Movmuxer) WriteInitSegment(w io.Writer) error {
 		return err
 	}
 	return muxer.writeMoov(w)
+}
+
+func (muxer *Movmuxer) reserveMoovSpace() error {
+	if muxer.moovReserved {
+		return nil
+	}
+	if muxer.moovReserveSize < 8 {
+		return errors.New("mp4: moov reserve size must be at least 8 bytes")
+	}
+
+	ftypBox := makeFtypBox(mov_tag(iso5), 0x200, []uint32{mov_tag(iso5), mov_tag(iso6), mov_tag(mp41)})
+	if _, err := muxer.writer.Write(ftypBox); err != nil {
+		return err
+	}
+	offset, err := muxer.writer.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	free := NewFreeBox()
+	free.Data = make([]byte, int(muxer.moovReserveSize)-8)
+	_, freeBox := free.Encode()
+	if _, err = muxer.writer.Write(freeBox); err != nil {
+		return err
+	}
+	muxer.moovReserveOffset = offset
+	muxer.moovReserved = true
+	return nil
+}
+
+func (muxer *Movmuxer) writeReservedMoov() error {
+	if !muxer.movFlag.isFragment() || muxer.moovWritten {
+		return nil
+	}
+	if !muxer.moovReserved {
+		return nil
+	}
+
+	var moov bytes.Buffer
+	if err := muxer.writeMoov(&moov); err != nil {
+		return err
+	}
+	if moov.Len() > int(muxer.moovReserveSize) {
+		return errors.New("mp4: reserved moov space is too small")
+	}
+	remaining := int(muxer.moovReserveSize) - moov.Len()
+	if remaining > 0 && remaining < 8 {
+		return errors.New("mp4: reserved moov space leaves invalid free box")
+	}
+
+	current, err := muxer.writer.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+	if _, err = muxer.writer.Seek(muxer.moovReserveOffset, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err = muxer.writer.Write(moov.Bytes()); err != nil {
+		return err
+	}
+	if remaining >= 8 {
+		free := NewFreeBox()
+		free.Data = make([]byte, remaining-8)
+		_, freeBox := free.Encode()
+		if _, err = muxer.writer.Write(freeBox); err != nil {
+			return err
+		}
+	}
+	if _, err = muxer.writer.Seek(current, io.SeekStart); err != nil {
+		return err
+	}
+	muxer.moovWritten = true
+	return nil
 }
 
 func (muxer *Movmuxer) reWriteMdatSize() (err error) {
@@ -488,13 +578,21 @@ func (muxer *Movmuxer) flushFragment() (err error) {
 	}
 
 	if muxer.movFlag.isFragment() {
-		if muxer.nextFragmentId == 1 { //first fragment ,write moov
-			ftypBox := makeFtypBox(mov_tag(iso5), 0x200, []uint32{mov_tag(iso5), mov_tag(iso6), mov_tag(mp41)})
-			_, err := muxer.writer.Write(ftypBox)
-			if err != nil {
-				return err
+		if muxer.nextFragmentId == 1 {
+			if muxer.moovReserveSize > 0 {
+				if err = muxer.reserveMoovSpace(); err != nil {
+					return err
+				}
+			} else {
+				ftypBox := makeFtypBox(mov_tag(iso5), 0x200, []uint32{mov_tag(iso5), mov_tag(iso6), mov_tag(mp41)})
+				if _, err = muxer.writer.Write(ftypBox); err != nil {
+					return err
+				}
+				if err = muxer.writeMoov(muxer.writer); err != nil {
+					return err
+				}
+				muxer.moovWritten = true
 			}
-			muxer.writeMoov(muxer.writer)
 		}
 	}
 
