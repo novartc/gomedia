@@ -45,7 +45,7 @@ func (mfro *MovieFragmentRandomAccessOffsetBox) Encode() (int, []byte) {
 }
 
 func makeMfroBox(mfraSize uint32) []byte {
-	mfro := NewMovieFragmentRandomAccessOffsetBox(mfraSize + 16)
+	mfro := NewMovieFragmentRandomAccessOffsetBox(mfraSize)
 	_, boxData := mfro.Encode()
 	return boxData
 }

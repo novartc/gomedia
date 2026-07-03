@@ -111,6 +111,38 @@ func collectTrexTrackIDs(data []byte) []uint32 {
 	return ids
 }
 
+func findTopLevelBox(data []byte, typ string) []byte {
+	for offset := 0; offset+8 <= len(data); {
+		size := uint64(binary.BigEndian.Uint32(data[offset:]))
+		headerSize := uint64(8)
+		if size == 1 {
+			if offset+16 > len(data) {
+				break
+			}
+			size = binary.BigEndian.Uint64(data[offset+8:])
+			headerSize = 16
+		} else if size == 0 {
+			size = uint64(len(data) - offset)
+		}
+		if size < headerSize || offset+int(size) > len(data) {
+			break
+		}
+		if string(data[offset+4:offset+8]) == typ {
+			return data[offset : offset+int(size)]
+		}
+		offset += int(size)
+	}
+	return nil
+}
+
+func mfroMfraSize(mfra []byte) uint32 {
+	payloads := collectBoxPayloads(mfra[8:], "mfro")
+	if len(payloads) == 0 || len(payloads[0]) < 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint32(payloads[0][4:8])
+}
+
 func hasTrackID(ids []uint32, id uint32) bool {
 	for _, current := range ids {
 		if current == id {
@@ -118,6 +150,49 @@ func hasTrackID(ids []uint32, id uint32) bool {
 		}
 	}
 	return false
+}
+
+func TestFragmentMuxerWritesConsistentMfraSize(t *testing.T) {
+	file, err := os.CreateTemp("", "gomedia-fragment-mfra-*.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(file.Name())
+	defer file.Close()
+
+	muxer, err := CreateMp4Muxer(file, WithMp4Flag(MP4_FLAG_FRAGMENT), WithFragmentDuration(100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audioTrack := muxer.AddAudioTrack(
+		MP4_CODEC_G711A,
+		WithAudioChannelCount(1),
+		WithAudioSampleRate(8000),
+		WithAudioSampleBits(16),
+	)
+	for dts := uint64(0); dts <= 220; dts += 20 {
+		if err := muxer.Write(audioTrack, []byte{0, 0, 0, 0}, dts, dts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := muxer.WriteTrailer(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mfra := findTopLevelBox(data, "mfra")
+	if len(mfra) == 0 {
+		t.Fatal("mfra box not found")
+	}
+	if got, want := mfroMfraSize(mfra), uint32(len(mfra)); got != want {
+		t.Fatalf("mfro mfra size = %d, want %d", got, want)
+	}
 }
 
 func TestFragmentMuxerAudioOnlyWhileVideoDelayed(t *testing.T) {

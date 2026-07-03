@@ -544,7 +544,7 @@ func (muxer *Movmuxer) writeMfra() (err error) {
 		mfraSize += len(tfras[i-1])
 	}
 
-	mfro := makeMfroBox(uint32(mfraSize) + 16)
+	mfro := makeMfroBox(uint32(mfraSize) + 24)
 	mfraSize += len(mfro)
 	mfra := BasicBox{Type: [4]byte{'m', 'f', 'r', 'a'}}
 	mfra.Size = 8 + uint64(mfraSize)
